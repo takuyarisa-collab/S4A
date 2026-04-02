@@ -18,6 +18,12 @@ type LineStructure = {
   length: number;
 };
 
+type StructureAnchor = {
+  structureIndex: number;
+  pointIndex: number;
+  point: Vec2;
+};
+
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d');
 if (!ctx) {
@@ -41,6 +47,7 @@ let ended = false;
 let drawing = false;
 let inputPoints: Vec2[] = [];
 let inputLength = 0;
+let strokeStartAnchor: StructureAnchor | null = null;
 const structures: LineStructure[] = [];
 let absorb: AbsorbState | null = null;
 
@@ -127,6 +134,69 @@ function detectClosedLoop(): LoopResult | null {
     }
   }
   return null;
+}
+
+function nearestStructureAnchor(p: Vec2): StructureAnchor | null {
+  let best: StructureAnchor | null = null;
+  let bestDistance = LOOP_HIT_RADIUS;
+
+  for (let s = 0; s < structures.length; s++) {
+    const points = structures[s].points;
+    for (let i = 0; i < points.length; i++) {
+      const d = distance(p, points[i]);
+      if (d <= bestDistance) {
+        bestDistance = d;
+        best = { structureIndex: s, pointIndex: i, point: points[i] };
+      }
+    }
+  }
+
+  return best;
+}
+
+function detectClosedLoopWithStructures(): LoopResult | null {
+  if (!strokeStartAnchor || inputPoints.length < 2) return null;
+  const tip = inputPoints[inputPoints.length - 1];
+  const tipAnchor = nearestStructureAnchor(tip);
+  if (!tipAnchor) return null;
+  if (tipAnchor.structureIndex !== strokeStartAnchor.structureIndex) return null;
+  if (tipAnchor.pointIndex === strokeStartAnchor.pointIndex) return null;
+
+  const structure = structures[tipAnchor.structureIndex];
+  const from = tipAnchor.pointIndex;
+  const to = strokeStartAnchor.pointIndex;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const segment = structure.points.slice(lo, hi + 1);
+  if (segment.length < 2) return null;
+  if (from > to) segment.reverse();
+
+  if (inputPoints.length + segment.length < LOOP_MIN_POINTS) {
+    return null;
+  }
+
+  let cx = 0;
+  let cy = 0;
+  let count = 0;
+
+  for (const p of inputPoints) {
+    cx += p.x;
+    cy += p.y;
+    count++;
+  }
+  for (const p of segment) {
+    cx += p.x;
+    cy += p.y;
+    count++;
+  }
+
+  inputPoints[0] = { ...strokeStartAnchor.point };
+  inputPoints[inputPoints.length - 1] = { ...tipAnchor.point };
+
+  return {
+    center: { x: cx / count, y: cy / count },
+    endIndex: 0,
+  };
 }
 
 function smoothLargeJitter(path: Vec2[]) {
@@ -253,9 +323,12 @@ canvas.addEventListener('pointerdown', (event) => {
   if (ended || absorb) return;
   inputPoints = [];
   inputLength = 0;
+  strokeStartAnchor = null;
   drawing = true;
   canvas.setPointerCapture(event.pointerId);
-  addPoint(pointerPos(event));
+  const p = pointerPos(event);
+  addPoint(p);
+  strokeStartAnchor = nearestStructureAnchor(p);
 });
 
 canvas.addEventListener('pointermove', (event) => {
@@ -267,6 +340,13 @@ canvas.addEventListener('pointermove', (event) => {
     inputPoints = inputPoints.slice(loop.endIndex);
     drawing = false;
     finalizeInputStroke(loop.center);
+    return;
+  }
+
+  const structureLoop = detectClosedLoopWithStructures();
+  if (structureLoop) {
+    drawing = false;
+    finalizeInputStroke(structureLoop.center);
     return;
   }
 
