@@ -25,10 +25,11 @@ type StructureAnchor = {
 };
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
-const ctx = canvas.getContext('2d');
-if (!ctx) {
+const maybeCtx = canvas.getContext('2d');
+if (!maybeCtx) {
   throw new Error('Canvas 2D context is not available.');
 }
+const ctx: CanvasRenderingContext2D = maybeCtx;
 
 let width = 0;
 let height = 0;
