@@ -9,7 +9,13 @@ type AbsorbState = {
   startTime: number;
   duration: number;
   center: Vec2;
+  path: Vec2[];
   from: Vec2[];
+};
+
+type LineStructure = {
+  points: Vec2[];
+  length: number;
 };
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -33,8 +39,9 @@ let gameStart = performance.now();
 let ended = false;
 
 let drawing = false;
-let points: Vec2[] = [];
-let totalLength = 0;
+let inputPoints: Vec2[] = [];
+let inputLength = 0;
+const structures: LineStructure[] = [];
 let absorb: AbsorbState | null = null;
 
 function resize() {
@@ -73,36 +80,39 @@ function pointerPos(event: PointerEvent): Vec2 {
 }
 
 function addPoint(p: Vec2) {
-  if (points.length === 0) {
-    points.push(p);
+  if (inputPoints.length === 0) {
+    inputPoints.push(p);
     return;
   }
-  const prev = points[points.length - 1];
+  const prev = inputPoints[inputPoints.length - 1];
   const seg = distance(prev, p);
 
   if (seg < MIN_STEP) return;
-  const remain = MAX_LENGTH - totalLength;
-  if (remain <= 0) return;
+  const remain = MAX_LENGTH - inputLength;
+  if (remain <= 0) {
+    drawing = false;
+    return;
+  }
 
   if (seg <= remain) {
-    points.push(p);
-    totalLength += seg;
+    inputPoints.push(p);
+    inputLength += seg;
   } else {
     const t = remain / seg;
-    points.push({ x: lerp(prev.x, p.x, t), y: lerp(prev.y, p.y, t) });
-    totalLength = MAX_LENGTH;
+    inputPoints.push({ x: lerp(prev.x, p.x, t), y: lerp(prev.y, p.y, t) });
+    inputLength = MAX_LENGTH;
     drawing = false;
   }
 }
 
 function detectClosedLoop(): LoopResult | null {
-  if (points.length < LOOP_MIN_POINTS) return null;
-  const tip = points[points.length - 1];
+  if (inputPoints.length < LOOP_MIN_POINTS) return null;
+  const tip = inputPoints[inputPoints.length - 1];
 
-  for (let i = 0; i < points.length - LOOP_MIN_POINTS; i++) {
-    const d = distance(tip, points[i]);
+  for (let i = 0; i < inputPoints.length - LOOP_MIN_POINTS; i++) {
+    const d = distance(tip, inputPoints[i]);
     if (d <= LOOP_HIT_RADIUS) {
-      const loopPoints = points.slice(i, points.length);
+      const loopPoints = inputPoints.slice(i, inputPoints.length);
       let cx = 0;
       let cy = 0;
       for (const p of loopPoints) {
@@ -135,16 +145,19 @@ function smoothLargeJitter(path: Vec2[]) {
       smoothed[i].y = lerp(b.y, mid.y, 0.65);
     }
   }
-
-  points = smoothed;
+  for (let i = 0; i < path.length; i++) {
+    path[i].x = smoothed[i].x;
+    path[i].y = smoothed[i].y;
+  }
 }
 
-function beginAbsorb(center: Vec2) {
+function beginAbsorb(center: Vec2, path: Vec2[]) {
   absorb = {
     startTime: performance.now(),
     duration: ABSORB_DURATION,
     center,
-    from: points.map((p) => ({ ...p })),
+    path,
+    from: path.map((p) => ({ ...p })),
   };
   drawing = false;
 }
@@ -154,31 +167,52 @@ function updateAbsorb(now: number) {
   const t = Math.min(1, (now - absorb.startTime) / absorb.duration);
   const e = easeOutCubic(t);
 
-  for (let i = 0; i < points.length; i++) {
+  for (let i = 0; i < absorb.path.length; i++) {
     const src = absorb.from[i];
-    points[i].x = lerp(src.x, absorb.center.x, e);
-    points[i].y = lerp(src.y, absorb.center.y, e);
+    absorb.path[i].x = lerp(src.x, absorb.center.x, e);
+    absorb.path[i].y = lerp(src.y, absorb.center.y, e);
   }
 
   if (t >= 1) {
-    smoothLargeJitter(points);
+    smoothLargeJitter(absorb.path);
     absorb = null;
   }
 }
 
-function drawPath() {
-  if (points.length < 2) return;
+function drawPath(path: Vec2[], length: number) {
+  if (path.length < 2) return;
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.lineWidth = 4;
-  ctx.strokeStyle = lineColorByLength(totalLength / MAX_LENGTH);
+  ctx.strokeStyle = lineColorByLength(length / MAX_LENGTH);
   ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 1; i < points.length; i++) {
-    ctx.lineTo(points[i].x, points[i].y);
+  ctx.moveTo(path[0].x, path[0].y);
+  for (let i = 1; i < path.length; i++) {
+    ctx.lineTo(path[i].x, path[i].y);
   }
   ctx.stroke();
+}
+
+function finalizeInputStroke(absorbCenter?: Vec2) {
+  if (inputPoints.length < 2) {
+    inputPoints = [];
+    inputLength = 0;
+    return;
+  }
+
+  const structure: LineStructure = {
+    points: inputPoints.map((p) => ({ ...p })),
+    length: inputLength,
+  };
+  structures.push(structure);
+
+  if (absorbCenter) {
+    beginAbsorb(absorbCenter, structure.points);
+  }
+
+  inputPoints = [];
+  inputLength = 0;
 }
 
 function drawTimer(now: number) {
@@ -200,7 +234,10 @@ function frame(now: number) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, width, height);
 
-  drawPath();
+  for (const structure of structures) {
+    drawPath(structure.points, structure.length);
+  }
+  drawPath(inputPoints, inputLength);
   drawTimer(now);
 
   if (ended) {
@@ -214,8 +251,8 @@ function frame(now: number) {
 
 canvas.addEventListener('pointerdown', (event) => {
   if (ended || absorb) return;
-  points = [];
-  totalLength = 0;
+  inputPoints = [];
+  inputLength = 0;
   drawing = true;
   canvas.setPointerCapture(event.pointerId);
   addPoint(pointerPos(event));
@@ -227,13 +264,21 @@ canvas.addEventListener('pointermove', (event) => {
 
   const loop = detectClosedLoop();
   if (loop) {
-    points = points.slice(loop.endIndex);
-    beginAbsorb(loop.center);
+    inputPoints = inputPoints.slice(loop.endIndex);
+    drawing = false;
+    finalizeInputStroke(loop.center);
+    return;
+  }
+
+  if (!drawing) {
+    finalizeInputStroke();
   }
 });
 
 const endDraw = () => {
+  if (!drawing) return;
   drawing = false;
+  finalizeInputStroke();
 };
 
 canvas.addEventListener('pointerup', endDraw);
