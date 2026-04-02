@@ -1,3 +1,5 @@
+import pkg from '../package.json';
+
 type Vec2 = { x: number; y: number };
 
 type LoopResult = {
@@ -41,6 +43,16 @@ const LOOP_HIT_RADIUS = 20;
 const LOOP_MIN_POINTS = 14;
 const ABSORB_DURATION = 800;
 const GAME_DURATION = 60000;
+
+function pad2(n: number) {
+  return String(n).padStart(2, '0');
+}
+
+const versionMmddss = (() => {
+  const d = new Date();
+  return `${pad2(d.getMonth() + 1)}${pad2(d.getDate())}${pad2(d.getSeconds())}`;
+})();
+const VERSION_LABEL = `Ver ${pkg.version}-${versionMmddss}`;
 
 let gameStart = performance.now();
 let ended = false;
@@ -291,7 +303,18 @@ function drawTimer(now: number) {
   const sec = Math.ceil(leftMs / 1000);
   ctx.fillStyle = '#ffffff';
   ctx.font = '16px sans-serif';
+  ctx.textAlign = 'left';
   ctx.fillText(`${sec}s`, 12, 24);
+}
+
+function drawVersion() {
+  ctx.save();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '16px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(VERSION_LABEL, width - 12, 24);
+  ctx.restore();
 }
 
 function frame(now: number) {
@@ -310,6 +333,7 @@ function frame(now: number) {
   }
   drawPath(inputPoints, inputLength);
   drawTimer(now);
+  drawVersion();
 
   if (ended) {
     ctx.fillStyle = '#fff';
