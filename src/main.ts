@@ -48,11 +48,11 @@ function pad2(n: number) {
   return String(n).padStart(2, '0');
 }
 
-const versionMmddss = (() => {
+const versionMmddhhmmss = (() => {
   const d = new Date();
-  return `${pad2(d.getMonth() + 1)}${pad2(d.getDate())}${pad2(d.getSeconds())}`;
+  return `${pad2(d.getMonth() + 1)}${pad2(d.getDate())}${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
 })();
-const VERSION_LABEL = `Ver ${pkg.version}-${versionMmddss}`;
+const VERSION_LABEL = `Ver ${pkg.version}-${versionMmddhhmmss}`;
 
 let gameStart = performance.now();
 let ended = false;
