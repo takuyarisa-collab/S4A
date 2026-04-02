@@ -4,7 +4,7 @@ type Vec2 = { x: number; y: number };
 
 type LoopResult = {
   center: Vec2;
-  endIndex: number;
+  path: Vec2[];
 };
 
 type AbsorbState = {
@@ -48,11 +48,11 @@ function pad2(n: number) {
   return String(n).padStart(2, '0');
 }
 
-const versionMmddss = (() => {
+const versionMmddhhmmss = (() => {
   const d = new Date();
-  return `${pad2(d.getMonth() + 1)}${pad2(d.getDate())}${pad2(d.getSeconds())}`;
+  return `${pad2(d.getMonth() + 1)}${pad2(d.getDate())}${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
 })();
-const VERSION_LABEL = `Ver ${pkg.version}-${versionMmddss}`;
+const VERSION_LABEL = `Ver ${pkg.version}-${versionMmddhhmmss}`;
 
 let gameStart = performance.now();
 let ended = false;
@@ -76,6 +76,14 @@ function distance(a: Vec2, b: Vec2) {
   const dx = a.x - b.x;
   const dy = a.y - b.y;
   return Math.hypot(dx, dy);
+}
+
+function pathLength(path: Vec2[]) {
+  let sum = 0;
+  for (let i = 1; i < path.length; i++) {
+    sum += distance(path[i - 1], path[i]);
+  }
+  return sum;
 }
 
 function lerp(a: number, b: number, t: number) {
@@ -142,7 +150,7 @@ function detectClosedLoop(): LoopResult | null {
       const inv = 1 / loopPoints.length;
       return {
         center: { x: cx * inv, y: cy * inv },
-        endIndex: i,
+        path: loopPoints.map((p) => ({ ...p })),
       };
     }
   }
@@ -169,7 +177,10 @@ function nearestStructureAnchor(p: Vec2): StructureAnchor | null {
 
 function detectClosedLoopWithStructures(): LoopResult | null {
   if (!strokeStartAnchor || inputPoints.length < 2) return null;
-  const tip = inputPoints[inputPoints.length - 1];
+  const normalizedInput = inputPoints.map((p) => ({ ...p }));
+  normalizedInput[0] = { ...strokeStartAnchor.point };
+
+  const tip = normalizedInput[normalizedInput.length - 1];
   const tipAnchor = nearestStructureAnchor(tip);
   if (!tipAnchor) return null;
   if (tipAnchor.structureIndex !== strokeStartAnchor.structureIndex) return null;
@@ -184,31 +195,24 @@ function detectClosedLoopWithStructures(): LoopResult | null {
   if (segment.length < 2) return null;
   if (from > to) segment.reverse();
 
-  if (inputPoints.length + segment.length < LOOP_MIN_POINTS) {
+  normalizedInput[normalizedInput.length - 1] = { ...tipAnchor.point };
+  const loopPath = normalizedInput.concat(segment.slice(1));
+
+  if (loopPath.length < LOOP_MIN_POINTS) {
     return null;
   }
 
   let cx = 0;
   let cy = 0;
-  let count = 0;
-
-  for (const p of inputPoints) {
+  for (const p of loopPath) {
     cx += p.x;
     cy += p.y;
-    count++;
   }
-  for (const p of segment) {
-    cx += p.x;
-    cy += p.y;
-    count++;
-  }
-
-  inputPoints[0] = { ...strokeStartAnchor.point };
-  inputPoints[inputPoints.length - 1] = { ...tipAnchor.point };
+  const count = loopPath.length;
 
   return {
     center: { x: cx / count, y: cy / count },
-    endIndex: 0,
+    path: loopPath,
   };
 }
 
@@ -277,16 +281,16 @@ function drawPath(path: Vec2[], length: number) {
   ctx.stroke();
 }
 
-function finalizeInputStroke(absorbCenter?: Vec2) {
-  if (inputPoints.length < 2) {
+function finalizeInputStroke(path = inputPoints, absorbCenter?: Vec2) {
+  if (path.length < 2) {
     inputPoints = [];
     inputLength = 0;
     return;
   }
 
   const structure: LineStructure = {
-    points: inputPoints.map((p) => ({ ...p })),
-    length: inputLength,
+    points: path.map((p) => ({ ...p })),
+    length: pathLength(path),
   };
   structures.push(structure);
 
@@ -362,16 +366,15 @@ canvas.addEventListener('pointermove', (event) => {
 
   const loop = detectClosedLoop();
   if (loop) {
-    inputPoints = inputPoints.slice(loop.endIndex);
     drawing = false;
-    finalizeInputStroke(loop.center);
+    finalizeInputStroke(loop.path, loop.center);
     return;
   }
 
   const structureLoop = detectClosedLoopWithStructures();
   if (structureLoop) {
     drawing = false;
-    finalizeInputStroke(structureLoop.center);
+    finalizeInputStroke(structureLoop.path, structureLoop.center);
     return;
   }
 
