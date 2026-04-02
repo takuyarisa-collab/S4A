@@ -2,7 +2,6 @@ type Vec2 = { x: number; y: number };
 
 type LoopResult = {
   center: Vec2;
-  endIndex: number;
 };
 
 type AbsorbState = {
@@ -13,9 +12,22 @@ type AbsorbState = {
   from: Vec2[];
 };
 
+type FlashState = {
+  startTime: number;
+  duration: number;
+  center: Vec2;
+  radius: number;
+};
+
 type LineStructure = {
   points: Vec2[];
   length: number;
+};
+
+type StructureAnchor = {
+  structureIndex: number;
+  pointIndex: number;
+  point: Vec2;
 };
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -33,6 +45,7 @@ const MIN_STEP = 3;
 const LOOP_HIT_RADIUS = 20;
 const LOOP_MIN_POINTS = 14;
 const ABSORB_DURATION = 800;
+const FLASH_DURATION = 260;
 const GAME_DURATION = 60000;
 
 let gameStart = performance.now();
@@ -41,8 +54,11 @@ let ended = false;
 let drawing = false;
 let inputPoints: Vec2[] = [];
 let inputLength = 0;
+let strokeStartAnchor: StructureAnchor | null = null;
+let liveSnapAnchor: StructureAnchor | null = null;
 const structures: LineStructure[] = [];
 let absorb: AbsorbState | null = null;
+let flash: FlashState | null = null;
 
 function resize() {
   width = window.innerWidth;
@@ -105,28 +121,75 @@ function addPoint(p: Vec2) {
   }
 }
 
-function detectClosedLoop(): LoopResult | null {
-  if (inputPoints.length < LOOP_MIN_POINTS) return null;
-  const tip = inputPoints[inputPoints.length - 1];
+function nearestStructureAnchor(p: Vec2): StructureAnchor | null {
+  let best: StructureAnchor | null = null;
+  let bestDistance = LOOP_HIT_RADIUS;
 
-  for (let i = 0; i < inputPoints.length - LOOP_MIN_POINTS; i++) {
-    const d = distance(tip, inputPoints[i]);
-    if (d <= LOOP_HIT_RADIUS) {
-      const loopPoints = inputPoints.slice(i, inputPoints.length);
-      let cx = 0;
-      let cy = 0;
-      for (const p of loopPoints) {
-        cx += p.x;
-        cy += p.y;
+  for (let s = 0; s < structures.length; s++) {
+    const points = structures[s].points;
+    for (let i = 0; i < points.length; i++) {
+      const d = distance(p, points[i]);
+      if (d <= bestDistance) {
+        bestDistance = d;
+        best = { structureIndex: s, pointIndex: i, point: points[i] };
       }
-      const inv = 1 / loopPoints.length;
-      return {
-        center: { x: cx * inv, y: cy * inv },
-        endIndex: i,
-      };
     }
   }
-  return null;
+
+  return best;
+}
+
+function detectClosedLoopWithStructures(): LoopResult | null {
+  if (!strokeStartAnchor || inputPoints.length < 2) return null;
+  const tip = inputPoints[inputPoints.length - 1];
+  const tipAnchor = nearestStructureAnchor(tip);
+  if (!tipAnchor) return null;
+  if (tipAnchor.structureIndex !== strokeStartAnchor.structureIndex) return null;
+  if (tipAnchor.pointIndex === strokeStartAnchor.pointIndex) return null;
+
+  const structure = structures[tipAnchor.structureIndex];
+  const from = tipAnchor.pointIndex;
+  const to = strokeStartAnchor.pointIndex;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const segment = structure.points.slice(lo, hi + 1);
+  if (segment.length < 2) return null;
+  if (from > to) segment.reverse();
+
+  if (inputPoints.length + segment.length < LOOP_MIN_POINTS) {
+    return null;
+  }
+
+  let cx = 0;
+  let cy = 0;
+  let count = 0;
+
+  for (const p of inputPoints) {
+    cx += p.x;
+    cy += p.y;
+    count++;
+  }
+  for (const p of segment) {
+    cx += p.x;
+    cy += p.y;
+    count++;
+  }
+
+  inputPoints[0] = { ...strokeStartAnchor.point };
+  inputPoints[inputPoints.length - 1] = { ...tipAnchor.point };
+
+  return {
+    center: { x: cx / count, y: cy / count },
+  };
+}
+
+function beginFlash(center: Vec2, radius = 18) {
+  flash = {
+    startTime: performance.now(),
+    duration: FLASH_DURATION,
+    center: { ...center },
+    radius,
+  };
 }
 
 function smoothLargeJitter(path: Vec2[]) {
@@ -194,6 +257,21 @@ function drawPath(path: Vec2[], length: number) {
   ctx.stroke();
 }
 
+function updateAndDrawFlash(now: number) {
+  if (!flash) return;
+  const t = Math.min(1, (now - flash.startTime) / flash.duration);
+  const alpha = 1 - t;
+  const radius = flash.radius + 22 * t;
+
+  ctx.beginPath();
+  ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+  ctx.lineWidth = 2;
+  ctx.arc(flash.center.x, flash.center.y, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  if (t >= 1) flash = null;
+}
+
 function finalizeInputStroke(absorbCenter?: Vec2) {
   if (inputPoints.length < 2) {
     inputPoints = [];
@@ -238,6 +316,13 @@ function frame(now: number) {
     drawPath(structure.points, structure.length);
   }
   drawPath(inputPoints, inputLength);
+  if (liveSnapAnchor && drawing) {
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.beginPath();
+    ctx.arc(liveSnapAnchor.point.x, liveSnapAnchor.point.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  updateAndDrawFlash(now);
   drawTimer(now);
 
   if (ended) {
@@ -253,20 +338,35 @@ canvas.addEventListener('pointerdown', (event) => {
   if (ended || absorb) return;
   inputPoints = [];
   inputLength = 0;
+  strokeStartAnchor = null;
+  liveSnapAnchor = null;
   drawing = true;
   canvas.setPointerCapture(event.pointerId);
-  addPoint(pointerPos(event));
+  const p = pointerPos(event);
+  addPoint(p);
+  strokeStartAnchor = nearestStructureAnchor(p);
+  liveSnapAnchor = strokeStartAnchor;
+  if (strokeStartAnchor) {
+    inputPoints[0] = { ...strokeStartAnchor.point };
+  }
 });
 
 canvas.addEventListener('pointermove', (event) => {
   if (!drawing || ended || absorb) return;
   addPoint(pointerPos(event));
+  if (inputPoints.length > 0) {
+    liveSnapAnchor = nearestStructureAnchor(inputPoints[inputPoints.length - 1]);
+    if (liveSnapAnchor) {
+      inputPoints[inputPoints.length - 1] = { ...liveSnapAnchor.point };
+    }
+  }
 
-  const loop = detectClosedLoop();
-  if (loop) {
-    inputPoints = inputPoints.slice(loop.endIndex);
+  const structureLoop = detectClosedLoopWithStructures();
+  if (structureLoop) {
     drawing = false;
-    finalizeInputStroke(loop.center);
+    liveSnapAnchor = null;
+    beginFlash(structureLoop.center, 16);
+    finalizeInputStroke(structureLoop.center);
     return;
   }
 
@@ -278,6 +378,7 @@ canvas.addEventListener('pointermove', (event) => {
 const endDraw = () => {
   if (!drawing) return;
   drawing = false;
+  liveSnapAnchor = null;
   finalizeInputStroke();
 };
 
