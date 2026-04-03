@@ -300,19 +300,18 @@ function frame(now: number) {
 canvas.addEventListener('pointerdown', (event) => {
   if (absorb) return;
   clearInputStroke();
-  strokeStartAnchor = null;
   const p = pointerPos(event);
   const anchor = nearestStructureAnchor(p);
-  const isClosureEndpoint =
+  const isClosureEndpoint = Boolean(
     anchor &&
-    anchor.structureIndex === 0 &&
-    (anchor.pointIndex === closureStartAnchorIndex || anchor.pointIndex === closureEndAnchorIndex);
-  if (!isClosureEndpoint) return;
+      anchor.structureIndex === 0 &&
+      (anchor.pointIndex === closureStartAnchorIndex || anchor.pointIndex === closureEndAnchorIndex),
+  );
+  strokeStartAnchor = isClosureEndpoint ? anchor : null;
 
   drawing = true;
   canvas.setPointerCapture(event.pointerId);
   addPoint(p);
-  strokeStartAnchor = anchor;
 });
 
 canvas.addEventListener('pointermove', (event) => {
@@ -324,16 +323,23 @@ canvas.addEventListener('pointermove', (event) => {
     drawing = false;
     beginAbsorb(structureLoop.center, structureLoop.path);
     clearInputStroke();
-    return;
-  }
-
-  if (!drawing) {
-    clearInputStroke();
   }
 });
 
-const endDraw = () => {
+const endDraw = (event: PointerEvent) => {
+  if (canvas.hasPointerCapture(event.pointerId)) {
+    canvas.releasePointerCapture(event.pointerId);
+  }
   if (!drawing) return;
+
+  const structureLoop = detectClosedLoopWithStructures();
+  if (structureLoop) {
+    drawing = false;
+    beginAbsorb(structureLoop.center, structureLoop.path);
+    clearInputStroke();
+    return;
+  }
+
   drawing = false;
   clearInputStroke();
 };
