@@ -36,16 +36,18 @@ let width = 0;
 let height = 0;
 const dpr = Math.max(1, window.devicePixelRatio || 1);
 
-const MAX_LENGTH = 1400;
+const VALIDATION_MODE = true;
+const MAX_LENGTH = VALIDATION_MODE ? 1_000_000 : 1400;
 const MIN_STEP = 3;
-const LOOP_HIT_RADIUS = 20;
-const LOOP_MIN_POINTS = 6;
+const LOOP_HIT_RADIUS = VALIDATION_MODE ? 30 : 20;
+const LOOP_MIN_POINTS = VALIDATION_MODE ? 2 : 6;
 const ABSORB_DURATION = 800;
 
 let drawing = false;
 let inputPoints: Vec2[] = [];
 let inputLength = 0;
 let strokeStartAnchor: StructureAnchor | null = null;
+let strokeAutoStoppedAtMaxLength = false;
 const structures: LineStructure[] = [];
 const persistedStrokes: LineStructure[] = [];
 let absorb: AbsorbState | null = null;
@@ -135,6 +137,7 @@ function addPoint(p: Vec2) {
   if (seg < MIN_STEP) return;
   const remain = MAX_LENGTH - inputLength;
   if (remain <= 0) {
+    strokeAutoStoppedAtMaxLength = true;
     drawing = false;
     return;
   }
@@ -146,6 +149,7 @@ function addPoint(p: Vec2) {
     const t = remain / seg;
     inputPoints.push({ x: lerp(prev.x, p.x, t), y: lerp(prev.y, p.y, t) });
     inputLength = MAX_LENGTH;
+    strokeAutoStoppedAtMaxLength = true;
     drawing = false;
   }
 }
@@ -168,38 +172,24 @@ function nearestStructureAnchor(p: Vec2): StructureAnchor | null {
   return best;
 }
 
-function detectClosedLoopWithStructures(): LoopResult | null {
-  if (!strokeStartAnchor || inputPoints.length < 2 || structures.length === 0) return null;
-  if (strokeStartAnchor.structureIndex !== 0) return null;
-  if (strokeStartAnchor.pointIndex !== closureStartAnchorIndex && strokeStartAnchor.pointIndex !== closureEndAnchorIndex) return null;
-
+function buildEndpointClosureLoop(startAnchor: StructureAnchor, endAnchor: StructureAnchor): LoopResult | null {
   const normalizedInput = inputPoints.map((p) => ({ ...p }));
-  normalizedInput[0] = { ...strokeStartAnchor.point };
+  if (normalizedInput.length < 2) return null;
 
-  const tip = normalizedInput[normalizedInput.length - 1];
-  const tipAnchor = nearestStructureAnchor(tip);
-  if (!tipAnchor) return null;
-  if (tipAnchor.structureIndex !== 0) return null;
+  normalizedInput[0] = { ...startAnchor.point };
+  normalizedInput[normalizedInput.length - 1] = { ...endAnchor.point };
 
-  const startedAtFirst = strokeStartAnchor.pointIndex === closureStartAnchorIndex;
-  const expectedEnd = startedAtFirst ? closureEndAnchorIndex : closureStartAnchorIndex;
-  if (tipAnchor.pointIndex !== expectedEnd) return null;
-
-  const structure = structures[tipAnchor.structureIndex];
-  const from = tipAnchor.pointIndex;
-  const to = strokeStartAnchor.pointIndex;
+  const structure = structures[endAnchor.structureIndex];
+  const from = endAnchor.pointIndex;
+  const to = startAnchor.pointIndex;
   const lo = Math.min(from, to);
   const hi = Math.max(from, to);
   const segment = structure.points.slice(lo, hi + 1);
   if (segment.length < 2) return null;
   if (from > to) segment.reverse();
 
-  normalizedInput[normalizedInput.length - 1] = { ...tipAnchor.point };
   const loopPath = normalizedInput.concat(segment.slice(1));
-
-  if (loopPath.length < LOOP_MIN_POINTS) {
-    return null;
-  }
+  if (loopPath.length < LOOP_MIN_POINTS) return null;
 
   let cx = 0;
   let cy = 0;
@@ -207,12 +197,31 @@ function detectClosedLoopWithStructures(): LoopResult | null {
     cx += p.x;
     cy += p.y;
   }
-  const count = loopPath.length;
 
   return {
-    center: { x: cx / count, y: cy / count },
+    center: { x: cx / loopPath.length, y: cy / loopPath.length },
     path: loopPath,
   };
+}
+
+function detectClosedLoopWithStructures(): LoopResult | null {
+  if (!strokeStartAnchor || inputPoints.length < 2 || structures.length === 0) return null;
+  if (strokeStartAnchor.structureIndex !== 0) return null;
+  if (strokeStartAnchor.pointIndex !== closureStartAnchorIndex && strokeStartAnchor.pointIndex !== closureEndAnchorIndex) return null;
+
+  const tip = inputPoints[inputPoints.length - 1];
+  const tipAnchor = nearestStructureAnchor(tip);
+  if (!tipAnchor || tipAnchor.structureIndex !== 0) return null;
+
+  const startedAtFirst = strokeStartAnchor.pointIndex === closureStartAnchorIndex;
+  const expectedEnd = startedAtFirst ? closureEndAnchorIndex : closureStartAnchorIndex;
+  if (tipAnchor.pointIndex !== expectedEnd) return null;
+
+  if (VALIDATION_MODE) {
+    return buildEndpointClosureLoop(strokeStartAnchor, tipAnchor);
+  }
+
+  return buildEndpointClosureLoop(strokeStartAnchor, tipAnchor);
 }
 
 function smoothLargeJitter(path: Vec2[]) {
@@ -284,6 +293,7 @@ function drawPath(path: Vec2[], length: number) {
 function clearInputStroke() {
   inputPoints = [];
   inputLength = 0;
+  strokeAutoStoppedAtMaxLength = false;
 }
 
 function persistInputStroke() {
@@ -327,6 +337,7 @@ canvas.addEventListener('pointerdown', (event) => {
   strokeStartAnchor = isClosureEndpoint ? anchor : null;
 
   drawing = true;
+  strokeAutoStoppedAtMaxLength = false;
   canvas.setPointerCapture(event.pointerId);
   addPoint(p);
 });
@@ -340,6 +351,12 @@ canvas.addEventListener('pointermove', (event) => {
     drawing = false;
     beginAbsorb(structureLoop.center, structureLoop.path);
     clearInputStroke();
+    return;
+  }
+
+  if (!drawing && strokeAutoStoppedAtMaxLength) {
+    persistInputStroke();
+    clearInputStroke();
   }
 });
 
@@ -347,7 +364,13 @@ const endDraw = (event: PointerEvent) => {
   if (canvas.hasPointerCapture(event.pointerId)) {
     canvas.releasePointerCapture(event.pointerId);
   }
-  if (!drawing) return;
+  if (!drawing) {
+    if (strokeAutoStoppedAtMaxLength) {
+      persistInputStroke();
+      clearInputStroke();
+    }
+    return;
+  }
 
   const structureLoop = detectClosedLoopWithStructures();
   if (structureLoop) {
