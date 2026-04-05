@@ -11,6 +11,7 @@ type AbsorbState = {
   center: Vec2;
   path: Vec2[];
   from: Vec2[];
+  length: number;
 };
 
 type LineStructure = {
@@ -46,6 +47,7 @@ let inputPoints: Vec2[] = [];
 let inputLength = 0;
 let strokeStartAnchor: StructureAnchor | null = null;
 const structures: LineStructure[] = [];
+const persistedStrokes: LineStructure[] = [];
 let absorb: AbsorbState | null = null;
 let closureStartAnchorIndex = -1;
 let closureEndAnchorIndex = -1;
@@ -242,6 +244,7 @@ function beginAbsorb(center: Vec2, path: Vec2[]) {
     center,
     path,
     from: path.map((p) => ({ ...p })),
+    length: pathLength(path),
   };
   drawing = false;
 }
@@ -283,6 +286,14 @@ function clearInputStroke() {
   inputLength = 0;
 }
 
+function persistInputStroke() {
+  if (inputPoints.length < 2) return;
+  persistedStrokes.push({
+    points: inputPoints.map((point) => ({ ...point })),
+    length: inputLength,
+  });
+}
+
 function frame(now: number) {
   updateAbsorb(now);
 
@@ -291,6 +302,12 @@ function frame(now: number) {
 
   for (const structure of structures) {
     drawPath(structure.points, structure.length);
+  }
+  for (const stroke of persistedStrokes) {
+    drawPath(stroke.points, stroke.length);
+  }
+  if (absorb) {
+    drawPath(absorb.path, absorb.length);
   }
   drawPath(inputPoints, inputLength);
 
@@ -341,6 +358,7 @@ const endDraw = (event: PointerEvent) => {
   }
 
   drawing = false;
+  persistInputStroke();
   clearInputStroke();
 };
 
