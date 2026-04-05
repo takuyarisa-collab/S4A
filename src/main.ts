@@ -47,7 +47,7 @@ const ABSORB_DURATION = 800;
 let drawing = false;
 let inputPoints: Vec2[] = [];
 let inputLength = 0;
-let strokeStartAnchor: StructureAnchor | null = null;
+let strokeStartEndpointIndex: number | null = null;
 let strokeAutoStoppedAtMaxLength = false;
 const structures: LineStructure[] = [];
 const persistedStrokes: LineStructure[] = [];
@@ -223,16 +223,36 @@ function getOppositeClosureAnchor(startAnchor: StructureAnchor | null): Structur
   };
 }
 
+function getClosureEndpointAnchor(pointIndex: number): StructureAnchor | null {
+  if (structures.length === 0) return null;
+  const point = structures[0].points[pointIndex];
+  if (!point) return null;
+  return {
+    structureIndex: 0,
+    pointIndex,
+    point,
+  };
+}
+
+function chooseStartEndpointForStroke(): StructureAnchor | null {
+  if (inputPoints.length === 0 || structures.length === 0) return null;
+  const first = inputPoints[0];
+  const start = getClosureEndpointAnchor(closureStartAnchorIndex);
+  const end = getClosureEndpointAnchor(closureEndAnchorIndex);
+  if (!start || !end) return null;
+  const dStart = distance(first, start.point);
+  const dEnd = distance(first, end.point);
+  return dStart <= dEnd ? start : end;
+}
+
 function evaluateEndpointClosure(): ClosureEval {
-  if (!strokeStartAnchor) return { ok: false, reason: 'No starting endpoint anchor was captured.' };
   if (structures.length === 0) return { ok: false, reason: 'No structures are available.' };
   if (inputPoints.length < 2) return { ok: false, reason: `Stroke has only ${inputPoints.length} point(s); need at least 2.` };
-  if (strokeStartAnchor.structureIndex !== 0) return { ok: false, reason: 'Start anchor is not on closure structure 0.' };
-  if (strokeStartAnchor.pointIndex !== closureStartAnchorIndex && strokeStartAnchor.pointIndex !== closureEndAnchorIndex) {
-    return { ok: false, reason: `Start anchor index ${strokeStartAnchor.pointIndex} is not a closure endpoint.` };
-  }
+  const startAnchor = chooseStartEndpointForStroke();
+  if (!startAnchor) return { ok: false, reason: 'Could not resolve closure start endpoint for this stroke.' };
+  strokeStartEndpointIndex = startAnchor.pointIndex;
 
-  const opposite = getOppositeClosureAnchor(strokeStartAnchor);
+  const opposite = getOppositeClosureAnchor(startAnchor);
   if (!opposite) return { ok: false, reason: 'Could not resolve opposite closure endpoint.' };
 
   const tip = inputPoints[inputPoints.length - 1];
@@ -251,7 +271,7 @@ function evaluateEndpointClosure(): ClosureEval {
     return { ok: false, reason: `Tip anchor index ${tipAnchor.pointIndex} did not match opposite endpoint index ${opposite.pointIndex}.` };
   }
 
-  const loop = buildEndpointClosureLoop(strokeStartAnchor, tipAnchor);
+  const loop = buildEndpointClosureLoop(startAnchor, tipAnchor);
   if (!loop) return { ok: false, reason: 'Failed to build endpoint closure loop.' };
   return { ok: true, loop, endAnchor: tipAnchor };
 }
@@ -332,6 +352,7 @@ function drawEndpointMarker(point: Vec2, color: string, radius: number) {
 function clearInputStroke() {
   inputPoints = [];
   inputLength = 0;
+  strokeStartEndpointIndex = null;
   strokeAutoStoppedAtMaxLength = false;
 }
 
@@ -379,8 +400,11 @@ function finalizeStrokeLikePointerUp(context: string) {
 }
 
 function maybeSnapToOppositeEndpoint(point: Vec2): Vec2 {
-  if (!VALIDATION_MODE || !drawing || !strokeStartAnchor) return point;
-  const opposite = getOppositeClosureAnchor(strokeStartAnchor);
+  if (!VALIDATION_MODE || !drawing) return point;
+  const startAnchor = chooseStartEndpointForStroke();
+  if (!startAnchor) return point;
+  strokeStartEndpointIndex = startAnchor.pointIndex;
+  const opposite = getOppositeClosureAnchor(startAnchor);
   if (!opposite) return point;
   const d = distance(point, opposite.point);
   if (d <= ENDPOINT_SNAP_RADIUS) {
@@ -408,8 +432,11 @@ function frame(now: number) {
     }
   }
 
-  if (drawing && strokeStartAnchor) {
-    drawEndpointMarker(strokeStartAnchor.point, '#00ff7b', 8);
+  if (drawing && strokeStartEndpointIndex !== null) {
+    const startAnchor = getClosureEndpointAnchor(strokeStartEndpointIndex);
+    if (startAnchor) {
+      drawEndpointMarker(startAnchor.point, '#00ff7b', 8);
+    }
   }
 
   for (const stroke of persistedStrokes) {
@@ -426,15 +453,7 @@ function frame(now: number) {
 canvas.addEventListener('pointerdown', (event) => {
   if (absorb) return;
   clearInputStroke();
-  const raw = pointerPos(event);
-  const anchor = nearestStructureAnchor(raw);
-  const isClosureEndpoint = Boolean(
-    anchor &&
-      anchor.structureIndex === 0 &&
-      (anchor.pointIndex === closureStartAnchorIndex || anchor.pointIndex === closureEndAnchorIndex),
-  );
-  strokeStartAnchor = isClosureEndpoint ? anchor : null;
-  const p = VALIDATION_MODE && strokeStartAnchor ? { ...strokeStartAnchor.point } : raw;
+  const p = pointerPos(event);
 
   drawing = true;
   strokeAutoStoppedAtMaxLength = false;
