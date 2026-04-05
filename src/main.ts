@@ -19,9 +19,11 @@ type LineStructure = {
   length: number;
 };
 
-type StructureAnchor = {
+type StructureConnection = {
   structureIndex: number;
-  pointIndex: number;
+  segmentIndex: number;
+  t: number;
+  distanceAlong: number;
   point: Vec2;
 };
 
@@ -41,22 +43,21 @@ const MAX_LENGTH = VALIDATION_MODE ? 360 : 1400;
 const MIN_STEP = 3;
 const LOOP_HIT_RADIUS = VALIDATION_MODE ? 30 : 20;
 const LOOP_MIN_POINTS = VALIDATION_MODE ? 2 : 6;
-const ENDPOINT_SNAP_RADIUS = VALIDATION_MODE ? 38 : 24;
 const ABSORB_DURATION = 800;
+const MIN_STRUCTURE_SPAN = 20;
 
 let drawing = false;
 let inputPoints: Vec2[] = [];
 let inputLength = 0;
-let strokeStartEndpointIndex: number | null = null;
+let strokeStartConnection: StructureConnection | null = null;
 let strokeAutoStoppedAtMaxLength = false;
 const structures: LineStructure[] = [];
 const persistedStrokes: LineStructure[] = [];
 let absorb: AbsorbState | null = null;
-let closureStartAnchorIndex = -1;
-let closureEndAnchorIndex = -1;
+let closureFlashUntil = 0;
 
 type ClosureEval =
-  | { ok: true; loop: LoopResult; endAnchor: StructureAnchor }
+  | { ok: true; loop: LoopResult; startConnection: StructureConnection; endConnection: StructureConnection }
   | { ok: false; reason: string };
 
 function resize() {
@@ -118,9 +119,6 @@ function createValidationStructure() {
     points,
     length: pathLength(points),
   });
-
-  closureStartAnchorIndex = 0;
-  closureEndAnchorIndex = points.length - 1;
 }
 
 function pointerPos(event: PointerEvent): Vec2 {
@@ -159,39 +157,78 @@ function addPoint(p: Vec2) {
   }
 }
 
-function nearestStructureAnchor(p: Vec2): StructureAnchor | null {
-  let best: StructureAnchor | null = null;
+function nearestStructureConnection(p: Vec2): StructureConnection | null {
+  let best: StructureConnection | null = null;
   let bestDistance = LOOP_HIT_RADIUS;
 
   for (let s = 0; s < structures.length; s++) {
     const points = structures[s].points;
-    for (let i = 0; i < points.length; i++) {
-      const d = distance(p, points[i]);
+    let cumulative = 0;
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      const abx = b.x - a.x;
+      const aby = b.y - a.y;
+      const segSq = abx * abx + aby * aby;
+      if (segSq === 0) continue;
+      const apx = p.x - a.x;
+      const apy = p.y - a.y;
+      const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / segSq));
+      const projected = {
+        x: a.x + abx * t,
+        y: a.y + aby * t,
+      };
+      const d = distance(p, projected);
       if (d <= bestDistance) {
         bestDistance = d;
-        best = { structureIndex: s, pointIndex: i, point: points[i] };
+        best = {
+          structureIndex: s,
+          segmentIndex: i,
+          t,
+          distanceAlong: cumulative + Math.hypot(abx, aby) * t,
+          point: projected,
+        };
       }
+      cumulative += Math.hypot(abx, aby);
     }
   }
 
   return best;
 }
 
-function buildEndpointClosureLoop(startAnchor: StructureAnchor, endAnchor: StructureAnchor): LoopResult | null {
+function buildStructureBoundaryPath(start: StructureConnection, end: StructureConnection): Vec2[] {
+  const structure = structures[start.structureIndex];
+  const points = structure.points;
+  if (points.length < 2) return [];
+  const boundary: Vec2[] = [{ ...start.point }];
+
+  if (start.segmentIndex < end.segmentIndex || (start.segmentIndex === end.segmentIndex && start.t <= end.t)) {
+    for (let i = start.segmentIndex + 1; i <= end.segmentIndex; i++) {
+      boundary.push({ ...points[i] });
+    }
+  } else {
+    for (let i = start.segmentIndex; i >= end.segmentIndex + 1; i--) {
+      boundary.push({ ...points[i] });
+    }
+  }
+
+  const last = boundary[boundary.length - 1];
+  if (!last || distance(last, end.point) > 0.5) {
+    boundary.push({ ...end.point });
+  }
+
+  return boundary;
+}
+
+function buildSegmentClosureLoop(startConnection: StructureConnection, endConnection: StructureConnection): LoopResult | null {
   const normalizedInput = inputPoints.map((p) => ({ ...p }));
   if (normalizedInput.length < 2) return null;
 
-  normalizedInput[0] = { ...startAnchor.point };
-  normalizedInput[normalizedInput.length - 1] = { ...endAnchor.point };
+  normalizedInput[0] = { ...startConnection.point };
+  normalizedInput[normalizedInput.length - 1] = { ...endConnection.point };
 
-  const structure = structures[endAnchor.structureIndex];
-  const from = endAnchor.pointIndex;
-  const to = startAnchor.pointIndex;
-  const lo = Math.min(from, to);
-  const hi = Math.max(from, to);
-  const segment = structure.points.slice(lo, hi + 1);
+  const segment = buildStructureBoundaryPath(endConnection, startConnection);
   if (segment.length < 2) return null;
-  if (from > to) segment.reverse();
 
   const loopPath = normalizedInput.concat(segment.slice(1));
   if (loopPath.length < LOOP_MIN_POINTS) return null;
@@ -209,71 +246,25 @@ function buildEndpointClosureLoop(startAnchor: StructureAnchor, endAnchor: Struc
   };
 }
 
-function getOppositeClosureAnchor(startAnchor: StructureAnchor | null): StructureAnchor | null {
-  if (!startAnchor || startAnchor.structureIndex !== 0 || structures.length === 0) return null;
-  if (startAnchor.pointIndex !== closureStartAnchorIndex && startAnchor.pointIndex !== closureEndAnchorIndex) return null;
-
-  const targetIndex = startAnchor.pointIndex === closureStartAnchorIndex ? closureEndAnchorIndex : closureStartAnchorIndex;
-  const targetPoint = structures[0].points[targetIndex];
-  if (!targetPoint) return null;
-  return {
-    structureIndex: 0,
-    pointIndex: targetIndex,
-    point: targetPoint,
-  };
-}
-
-function getClosureEndpointAnchor(pointIndex: number): StructureAnchor | null {
-  if (structures.length === 0) return null;
-  const point = structures[0].points[pointIndex];
-  if (!point) return null;
-  return {
-    structureIndex: 0,
-    pointIndex,
-    point,
-  };
-}
-
-function chooseStartEndpointForStroke(): StructureAnchor | null {
-  if (inputPoints.length === 0 || structures.length === 0) return null;
-  const first = inputPoints[0];
-  const start = getClosureEndpointAnchor(closureStartAnchorIndex);
-  const end = getClosureEndpointAnchor(closureEndAnchorIndex);
-  if (!start || !end) return null;
-  const dStart = distance(first, start.point);
-  const dEnd = distance(first, end.point);
-  return dStart <= dEnd ? start : end;
-}
-
-function evaluateEndpointClosure(): ClosureEval {
+function evaluateSegmentClosure(): ClosureEval {
   if (structures.length === 0) return { ok: false, reason: 'No structures are available.' };
   if (inputPoints.length < 2) return { ok: false, reason: `Stroke has only ${inputPoints.length} point(s); need at least 2.` };
-  const startAnchor = chooseStartEndpointForStroke();
-  if (!startAnchor) return { ok: false, reason: 'Could not resolve closure start endpoint for this stroke.' };
-  strokeStartEndpointIndex = startAnchor.pointIndex;
-
-  const opposite = getOppositeClosureAnchor(startAnchor);
-  if (!opposite) return { ok: false, reason: 'Could not resolve opposite closure endpoint.' };
-
+  const startConnection = strokeStartConnection ?? nearestStructureConnection(inputPoints[0]);
+  if (!startConnection) return { ok: false, reason: 'Stroke does not begin from a nearby wall segment.' };
+  strokeStartConnection = startConnection;
   const tip = inputPoints[inputPoints.length - 1];
-  const tipDistanceToOpposite = distance(tip, opposite.point);
-  if (tipDistanceToOpposite > LOOP_HIT_RADIUS) {
-    return {
-      ok: false,
-      reason: `Stroke tip is ${tipDistanceToOpposite.toFixed(2)}px from opposite endpoint; required <= ${LOOP_HIT_RADIUS}px.`,
-    };
+  const endConnection = nearestStructureConnection(tip);
+  if (!endConnection) return { ok: false, reason: 'Stroke tip is not touching a nearby wall segment.' };
+  if (endConnection.structureIndex !== startConnection.structureIndex) {
+    return { ok: false, reason: 'Stroke must close back into the same wall structure segment.' };
   }
-
-  const tipAnchor = nearestStructureAnchor(tip);
-  if (!tipAnchor) return { ok: false, reason: 'Tip did not resolve to any nearby anchor.' };
-  if (tipAnchor.structureIndex !== 0) return { ok: false, reason: `Tip anchor structure ${tipAnchor.structureIndex} is not closure structure 0.` };
-  if (tipAnchor.pointIndex !== opposite.pointIndex) {
-    return { ok: false, reason: `Tip anchor index ${tipAnchor.pointIndex} did not match opposite endpoint index ${opposite.pointIndex}.` };
+  const span = Math.abs(endConnection.distanceAlong - startConnection.distanceAlong);
+  if (span < MIN_STRUCTURE_SPAN) {
+    return { ok: false, reason: `Wall span (${span.toFixed(2)}px) is too short to define a meaningful closure.` };
   }
-
-  const loop = buildEndpointClosureLoop(startAnchor, tipAnchor);
-  if (!loop) return { ok: false, reason: 'Failed to build endpoint closure loop.' };
-  return { ok: true, loop, endAnchor: tipAnchor };
+  const loop = buildSegmentClosureLoop(startConnection, endConnection);
+  if (!loop) return { ok: false, reason: 'Failed to build wall-segment closure loop.' };
+  return { ok: true, loop, startConnection, endConnection };
 }
 
 function smoothLargeJitter(path: Vec2[]) {
@@ -307,6 +298,7 @@ function beginAbsorb(center: Vec2, path: Vec2[]) {
     from: path.map((p) => ({ ...p })),
     length: pathLength(path),
   };
+  closureFlashUntil = performance.now() + 220;
   drawing = false;
 }
 
@@ -342,7 +334,7 @@ function drawPath(path: Vec2[], length: number) {
   ctx.stroke();
 }
 
-function drawEndpointMarker(point: Vec2, color: string, radius: number) {
+function drawConnectionMarker(point: Vec2, color: string, radius: number) {
   ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
@@ -352,7 +344,7 @@ function drawEndpointMarker(point: Vec2, color: string, radius: number) {
 function clearInputStroke() {
   inputPoints = [];
   inputLength = 0;
-  strokeStartEndpointIndex = null;
+  strokeStartConnection = null;
   strokeAutoStoppedAtMaxLength = false;
 }
 
@@ -370,7 +362,7 @@ function logClosureFailure(context: string, reason: string) {
 }
 
 function tryFinalizeClosure(context: string, logFailures = true): boolean {
-  const evaluation = evaluateEndpointClosure();
+  const evaluation = evaluateSegmentClosure();
   if (!evaluation.ok) {
     if (logFailures) {
       logClosureFailure(context, evaluation.reason);
@@ -380,7 +372,7 @@ function tryFinalizeClosure(context: string, logFailures = true): boolean {
 
   if (VALIDATION_MODE) {
     console.log(
-      `[validation] closure reached endpoint ${evaluation.endAnchor.pointIndex}; absorption triggered immediately (${context}).`,
+      `[validation] closure reached wall segment ${evaluation.endConnection.segmentIndex}; absorption triggered immediately (${context}).`,
     );
   }
   drawing = false;
@@ -399,20 +391,6 @@ function finalizeStrokeLikePointerUp(context: string) {
   clearInputStroke();
 }
 
-function maybeSnapToOppositeEndpoint(point: Vec2): Vec2 {
-  if (!VALIDATION_MODE || !drawing) return point;
-  const startAnchor = chooseStartEndpointForStroke();
-  if (!startAnchor) return point;
-  strokeStartEndpointIndex = startAnchor.pointIndex;
-  const opposite = getOppositeClosureAnchor(startAnchor);
-  if (!opposite) return point;
-  const d = distance(point, opposite.point);
-  if (d <= ENDPOINT_SNAP_RADIUS) {
-    return { ...opposite.point };
-  }
-  return point;
-}
-
 function frame(now: number) {
   updateAbsorb(now);
 
@@ -423,26 +401,25 @@ function frame(now: number) {
     drawPath(structure.points, structure.length);
   }
 
-  if (structures.length > 0) {
-    const start = structures[0].points[closureStartAnchorIndex];
-    const end = structures[0].points[closureEndAnchorIndex];
-    if (start && end) {
-      drawEndpointMarker(start, '#f5d742', 6);
-      drawEndpointMarker(end, '#f5d742', 6);
-    }
-  }
-
-  if (drawing && strokeStartEndpointIndex !== null) {
-    const startAnchor = getClosureEndpointAnchor(strokeStartEndpointIndex);
-    if (startAnchor) {
-      drawEndpointMarker(startAnchor.point, '#00ff7b', 8);
-    }
+  if (drawing && strokeStartConnection) {
+    drawConnectionMarker(strokeStartConnection.point, '#00ff7b', 8);
   }
 
   for (const stroke of persistedStrokes) {
     drawPath(stroke.points, stroke.length);
   }
   if (absorb) {
+    if (now <= closureFlashUntil) {
+      const fade = (closureFlashUntil - now) / 220;
+      ctx.fillStyle = `rgba(70, 220, 255, ${Math.max(0.18, fade * 0.45)})`;
+      ctx.beginPath();
+      ctx.moveTo(absorb.path[0].x, absorb.path[0].y);
+      for (let i = 1; i < absorb.path.length; i++) {
+        ctx.lineTo(absorb.path[i].x, absorb.path[i].y);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
     drawPath(absorb.path, absorb.length);
   }
   drawPath(inputPoints, inputLength);
@@ -463,8 +440,7 @@ canvas.addEventListener('pointerdown', (event) => {
 
 canvas.addEventListener('pointermove', (event) => {
   if (!drawing || absorb) return;
-  const nextPoint = maybeSnapToOppositeEndpoint(pointerPos(event));
-  addPoint(nextPoint);
+  addPoint(pointerPos(event));
 
   if (tryFinalizeClosure('pointermove', false)) {
     return;
